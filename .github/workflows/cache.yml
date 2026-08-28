@@ -46,28 +46,49 @@ jobs:
           echo "下载项: $versions"
           for version in $versions; do
             major="${version%%.*}"
-            url="https://www.kernel.org/pub/linux/kernel/v${major}.x/linux-${version}.tar.xz"
             fname="linux-${version}.tar.xz"
-            if [ -f "tarballs/$fname" ]; then
+            out="tarballs/$fname"
+            if [ -f "$out" ]; then
               echo "跳过已存在的 $fname"
               continue
             fi
-            echo "=== 下载 $fname ($url) ==="
-            curl -sfL --retry 10 --retry-delay 30 --connect-timeout 30 --max-time 600 \
-              "$url" -o "tarballs/$fname" || {
-              echo "::warning::下载 $fname 失败，跳过"
+            ok=false
+            # cdn.kernel.org is the Fastly-backed mirror; www.kernel.org 302s to
+            # it anyway but resets large transfers far more often.
+            for base in https://cdn.kernel.org/pub/linux/kernel https://www.kernel.org/pub/linux/kernel; do
+              url="$base/v${major}.x/$fname"
+              echo "=== 下载 $fname ($url) ==="
+              # -C - resumes a partial file, so a reset costs only the remainder
+              if curl -fL --retry 10 --retry-delay 20 --retry-all-errors \
+                   --connect-timeout 30 --speed-time 60 --speed-limit 10240 \
+                   -C - "$url" -o "$out"; then
+                ok=true
+                break
+              fi
+              echo "$base 失败，换下一个镜像"
+            done
+            if [ "$ok" != true ] || [ "$(stat -c%s "$out" 2>/dev/null || echo 0)" -lt 50000000 ]; then
+              # a truncated file must not reach the release, it would poison
+              # every consumer's checksum check
+              echo "::warning::下载 $fname 失败或不完整，删除并跳过"
+              rm -f "$out"
               continue
-            }
-            ls -lh "tarballs/$fname"
+            fi
+            ls -lh "$out"
           done
 
       - name: Publish release
-        if: hashFiles('tarballs/*') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "待上传: $(ls tarballs/)"
+          if [ -z "$(ls -A tarballs 2>/dev/null)" ]; then
+            echo "::error::一个 tarball 都没下载到"
+            exit 1
+          fi
+          echo "待上传:"; ls -lh tarballs/
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes
+            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
             echo "已删除旧 release"
           fi
           gh release create "$RELEASE_TAG" tarballs/* \
