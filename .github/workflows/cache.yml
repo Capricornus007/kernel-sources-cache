@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tarballs
-          versions=${{ steps.vers.outputs.versions }}
+          versions="${{ steps.vers.outputs.versions }}"
           echo "下载项: $versions"
           for version in $versions; do
             major="${version%%.*}"
